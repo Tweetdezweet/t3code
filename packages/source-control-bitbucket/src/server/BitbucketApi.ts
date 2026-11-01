@@ -12,6 +12,7 @@ import {
   settingsSecretLiteral,
   SourceControlProviderKind,
   TrimmedNonEmptyString,
+  VcsError,
   type SourceControlProviderAuth,
   type SourceControlProviderInfo,
   type SourceControlRepositoryCloneUrls,
@@ -33,6 +34,7 @@ import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStr
 import * as SourceControlProvider from "@t3tools/source-control-core/server/SourceControlProvider";
 import * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 import { readSourceControlHostSettings } from "@t3tools/source-control-core/shared/definition";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as BitbucketClient from "../shared/definition.ts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
@@ -41,10 +43,13 @@ const DEFAULT_API_BASE_URL = "https://api.bitbucket.org/2.0";
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 const MAX_REDIRECTS = 3;
 const BITBUCKET_API_REQUEST_TIMEOUT = "30 seconds";
+const isVcsError = Schema.is(VcsError);
 /** A sweep over many branches would otherwise reach Bitbucket as one burst of lookups. */
 const CONCURRENCY = 4;
 
 const BitbucketApiEnvConfig = Config.all({
+  apiMode: Config.String("T3CODE_BITBUCKET_API_MODE").pipe(Config.withDefault("bkt")),
+  cliPath: Config.String("T3CODE_BITBUCKET_CLI_PATH").pipe(Config.withDefault("bkt")),
   baseUrl: Config.String("T3CODE_BITBUCKET_API_BASE_URL").pipe(
     Config.withDefault(DEFAULT_API_BASE_URL),
   ),
@@ -105,6 +110,9 @@ export class BitbucketRequestError extends Schema.TaggedError<BitbucketRequestEr
   },
 ) {
   get detail(): string {
+    if (isVcsError(this.cause) && this.cause._tag.startsWith("VcsProcess")) {
+      return "The bkt CLI could not run. Install bkt on the T3 server and check `bkt auth status`.";
+    }
     return "Failed to send the Bitbucket request.";
   }
 
@@ -646,12 +654,26 @@ const responseError = Effect.fn("BitbucketApi.responseError")(function* (
   });
 });
 
+function bktHttpStatus(output: {
+  readonly stderr: string;
+  readonly stdout: string;
+}): number | null {
+  const text = `${output.stderr}\n${output.stdout}`;
+  if (/\bnot\s+(?:logged|signed)\s+in\b|\bnot authenticated\b/iu.test(text)) return 401;
+  const match =
+    /\b(?:HTTP(?:\/\d(?:\.\d)?)?(?:\s+status)?|status(?:\s+code)?)\s*[:=]?\s*(401|403|404|409|422|429|5\d{2})\b/iu.exec(
+      text,
+    );
+  return match?.[1] ? Number(match[1]) : null;
+}
+
 /** @public */
 export const make = Effect.gen(function* () {
   const config = yield* BitbucketApiEnvConfig;
   const host = yield* SourceControlHost.SourceControlHost;
   const git = host.git;
   const httpClient = yield* HttpClient.HttpClient;
+  const workingDirectory = yield* HostProcess.WorkingDirectory;
   const fileSystem = yield* FileSystem.FileSystem;
   const limits = yield* SourceControlRateLimit.SourceControlRateLimit;
   const slots = yield* Semaphore.make(CONCURRENCY);
@@ -691,15 +713,75 @@ export const make = Effect.gen(function* () {
   );
 
   const withAuth = (request: HttpClientRequest.HttpClientRequest) =>
-    currentCredential.pipe(
-      Effect.map((credential) =>
-        credential === null
-          ? request
-          : credential.kind === "access-token"
-            ? request.pipe(HttpClientRequest.bearerToken(credential.accessToken))
-            : request.pipe(HttpClientRequest.basicAuth(credential.email, credential.apiToken)),
-      ),
-    );
+    config.apiMode === "bkt"
+      ? Effect.succeed(request)
+      : currentCredential.pipe(
+          Effect.map((credential) =>
+            credential === null
+              ? request
+              : credential.kind === "access-token"
+                ? request.pipe(HttpClientRequest.bearerToken(credential.accessToken))
+                : request.pipe(HttpClientRequest.basicAuth(credential.email, credential.apiToken)),
+          ),
+        );
+
+  const executeRequest = Effect.fn("BitbucketApi.executeRequest")(function* (
+    request: HttpClientRequest.HttpClientRequest,
+  ) {
+    if (config.apiMode !== "bkt") return yield* httpClient.execute(request);
+    const apiBase = new URL(config.baseUrl);
+    const requestUrl = Option.getOrNull(HttpClientRequest.toUrl(request));
+    if (requestUrl === null) {
+      return yield* new BitbucketRequestError({
+        operation: "request",
+        cause: new Error("Invalid Bitbucket request URL"),
+      });
+    }
+    if (requestUrl.origin !== apiBase.origin) {
+      return yield* new BitbucketRequestError({
+        operation: "request",
+        cause: new Error("Bitbucket request host does not match the configured API host"),
+      });
+    }
+    const basePath = apiBase.pathname.replace(/\/+$/u, "");
+    const path = requestUrl.pathname.startsWith(basePath)
+      ? requestUrl.pathname.slice(basePath.length) || "/"
+      : requestUrl.pathname;
+    const endpoint = `${path}${requestUrl.search}`;
+    const args = ["api", endpoint, "--method", request.method];
+    const acceptsJson = request.headers.accept?.includes("json") ?? false;
+    if (acceptsJson) args.push("--json");
+    if (request.body._tag === "Uint8Array") {
+      args.push("--input", new TextDecoder().decode(request.body.body));
+    }
+    return yield* host.process
+      .run({
+        operation: "BitbucketApi.bkt",
+        command: config.cliPath,
+        args,
+        cwd: workingDirectory,
+        env: { BKT_HOST: apiBase.origin },
+        allowNonZeroExit: true,
+        timeoutMs: 30_000,
+        maxOutputBytes: DEFAULT_MAX_RESPONSE_BYTES,
+      })
+      .pipe(
+        Effect.map((output) => {
+          const status = Number(output.exitCode) === 0 ? 200 : (bktHttpStatus(output) ?? 500);
+          const body =
+            Number(output.exitCode) === 0
+              ? output.stdout
+              : JSON.stringify({ error: output.stderr || output.stdout || "bkt request failed" });
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response(body, {
+              status,
+              headers: { "content-type": acceptsJson ? "application/json" : "text/plain" },
+            }),
+          );
+        }),
+      );
+  });
 
   /**
    * Every request waits for one of the shared slots, then honors the pause a 429 starts for the
@@ -756,7 +838,7 @@ export const make = Effect.gen(function* () {
     throttled(
       request.method,
       withAuth(request.pipe(HttpClientRequest.acceptJson)).pipe(
-        Effect.flatMap(httpClient.execute),
+        Effect.flatMap(executeRequest),
         Effect.mapError(
           (cause) =>
             new BitbucketRequestError({
@@ -960,7 +1042,7 @@ export const make = Effect.gen(function* () {
         ? base
         : base.pipe(HttpClientRequest.bodyText(input.body, "application/json"));
     return withAuth(withBody).pipe(
-      Effect.flatMap(httpClient.execute),
+      Effect.flatMap(executeRequest),
       Effect.mapError(
         (cause): BitbucketApiError => new BitbucketRequestError({ operation: "request", cause }),
       ),
@@ -1024,25 +1106,45 @@ export const make = Effect.gen(function* () {
   return BitbucketApi.of({
     request,
     // Bitbucket answers anonymous /user with 401, so without a credential there is nothing to ask.
-    probeAuth: currentCredential.pipe(
-      Effect.flatMap((credential) =>
-        credential === null
-          ? Effect.succeed(authFromCredential(null))
-          : executeJson(
-              "probeAuth",
-              HttpClientRequest.get(apiUrl("/user")),
-              BitbucketUserSchema,
-            ).pipe(
-              Effect.map((user) => ({
-                status: "authenticated" as const,
-                account: nonEmpty(user.username ?? user.display_name ?? user.account_id),
-                host: Option.some("bitbucket.org"),
-                detail: Option.none<string>(),
-              })),
-              Effect.catch(() => currentCredential.pipe(Effect.map(authFromCredential))),
+    probeAuth:
+      config.apiMode === "bkt"
+        ? executeJson(
+            "probeAuth",
+            HttpClientRequest.get(apiUrl("/user")),
+            BitbucketUserSchema,
+          ).pipe(
+            Effect.map((user) => ({
+              status: "authenticated" as const,
+              account: nonEmpty(user.username ?? user.display_name ?? user.account_id),
+              host: Option.some("bitbucket.org"),
+              detail: Option.none<string>(),
+            })),
+            Effect.orElseSucceed(() => ({
+              status: "unauthenticated" as const,
+              account: Option.none<string>(),
+              host: Option.some("bitbucket.org"),
+              detail: Option.some("Install bkt and run `bkt auth status` on the T3 server."),
+            })),
+          )
+        : currentCredential.pipe(
+            Effect.flatMap((credential) =>
+              credential === null
+                ? Effect.succeed(authFromCredential(null))
+                : executeJson(
+                    "probeAuth",
+                    HttpClientRequest.get(apiUrl("/user")),
+                    BitbucketUserSchema,
+                  ).pipe(
+                    Effect.map((user) => ({
+                      status: "authenticated" as const,
+                      account: nonEmpty(user.username ?? user.display_name ?? user.account_id),
+                      host: Option.some("bitbucket.org"),
+                      detail: Option.none<string>(),
+                    })),
+                    Effect.catch(() => currentCredential.pipe(Effect.map(authFromCredential))),
+                  ),
             ),
-      ),
-    ),
+          ),
     listPullRequests: Effect.fn("BitbucketApi.listPullRequests")(function (input) {
       return resolveRepository(input).pipe(
         Effect.flatMap((repository) => {

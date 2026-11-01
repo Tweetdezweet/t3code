@@ -180,6 +180,7 @@ import {
   applySidebarThreadDrop,
   filterSidebarV2VisibleThreads,
   groupSidebarThreadsByProject,
+  projectFolderThreadCandidates,
   sidebarFolderExpansionKeys,
   buildBulkTitleRegenerationContextMenuItem,
   buildBulkUnpinContextMenuItem,
@@ -262,6 +263,7 @@ import {
   type SidebarProviderEntry,
   type SidebarSweepAction,
 } from "./sidebar/SidebarThreadRow";
+import { SidebarThreadPrompts } from "./sidebar/SidebarThreadPrompts";
 import { SidebarDraftBlock } from "./sidebar/SidebarDraftBlock";
 import {
   SidebarProjectFolderHeader,
@@ -506,7 +508,7 @@ function useSidebarThreads(input: {
   // Older settled threads load in pages; the shelf lists them only as far as they are loaded.
   const olderSettledShelf = useOlderSettledShelf({
     scopes: olderSettledScopes([...serverConfigs.keys()], scopedProjectKeys),
-    expanded: settledShelfExpanded,
+    expanded: settledShelfExpanded || folderGroups !== null,
     visibleCount: settledVisibleCount,
   });
   const listedSettledThreads = settledThreads.filter(olderSettledShelf.isListed);
@@ -526,19 +528,31 @@ function useSidebarThreads(input: {
     }
     return visible.length === settledThreads.length ? settledThreads : visible;
   })();
-  const renderedSettledThreads = settledShelfExpanded
-    ? visibleSettledThreads
-    : routeThreadOnly(visibleSettledThreads, routeRowThreadKey);
-  const visibleSnoozedThreads = snoozedShelfExpanded
-    ? snoozedThreads
-    : routeThreadOnly(snoozedThreads, routeRowThreadKey);
+  const renderedSettledThreads =
+    settledShelfExpanded || folderGroups !== null
+      ? visibleSettledThreads
+      : routeThreadOnly(visibleSettledThreads, routeRowThreadKey);
+  const visibleSnoozedThreads =
+    snoozedShelfExpanded || folderGroups !== null
+      ? snoozedThreads
+      : routeThreadOnly(snoozedThreads, routeRowThreadKey);
   const visibleWorkingThreads = workingShelfExpanded
     ? workingThreads
     : routeThreadOnly(workingThreads, routeRowThreadKey);
   const projectFolders =
     folderGroups === null
       ? null
-      : groupSidebarThreadsByProject(folderGroups, activeThreads, keepEmpty).map((folder) => {
+      : groupSidebarThreadsByProject(
+          folderGroups,
+          projectFolderThreadCandidates({
+            pinned: pinnedThreads,
+            active: activeThreads,
+            working: visibleWorkingThreads,
+            snoozed: visibleSnoozedThreads,
+            settled: renderedSettledThreads,
+          }),
+          keepEmpty,
+        ).map((folder) => {
           const collapsed = !resolveProjectExpanded(
             projectExpandedById,
             sidebarFolderExpansionKeys(folder.group),
@@ -556,13 +570,12 @@ function useSidebarThreads(input: {
           };
         });
   const orderedThreads = [
-    ...pinnedThreads,
     ...(projectFolders === null
-      ? activeThreads
+      ? [...pinnedThreads, ...activeThreads]
       : projectFolders.flatMap((folder) => folder.threads)),
-    ...visibleWorkingThreads,
-    ...visibleSnoozedThreads,
-    ...renderedSettledThreads,
+    ...(projectFolders === null
+      ? [...visibleWorkingThreads, ...visibleSnoozedThreads, ...renderedSettledThreads]
+      : []),
   ];
   const sectionByThreadKey = new Map<string, SidebarSection>();
   for (const [list, section] of [
@@ -1056,6 +1069,18 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
       ? scopedThreadKey(renamingThreadRef)
       : null;
   const [renamingTitle, setRenamingTitle] = useState("");
+  const [expandedPromptThreadKeys, setExpandedPromptThreadKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const toggleThreadPrompts = useStableCallback((threadRef: ScopedThreadRef) => {
+    const key = scopedThreadKey(threadRef);
+    setExpandedPromptThreadKeys((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  });
   const settlingThreadKeysRef = useRef(new Set<string>());
   const threadListRef = useRef<HTMLUListElement | null>(null);
   const sidebarContentRef = useRef<HTMLDivElement | null>(null);
@@ -1357,8 +1382,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           [...scopeGroups, ...projectGroups.filter((project) => project.archived)]
         : scopedProjectGroups
       : null,
-    keepEmptyFolders: (group) =>
-      scopedProjectGroups.length > 0 || (group.pinned && !group.archived),
+    keepEmptyFolders: (group) => !group.archived,
   });
 
   // Ranked across environments as the palette ranks them, so one
@@ -1941,10 +1965,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     ) {
       return [];
     }
-    const items: SidebarListItem[] = [{ kind: "marker", marker: "pinned-header" }];
     const pinnedRows = rowsOf(pinnedThreads, "pinned");
-    items.push(...pinnedRows);
-    items.push({ kind: "marker", marker: "pinned-divider" });
+    const items: SidebarListItem[] = [];
+    if (projectFolders === null) {
+      items.push({ kind: "marker", marker: "pinned-header" });
+      items.push(...pinnedRows);
+      items.push({ kind: "marker", marker: "pinned-divider" });
+    }
     const activeRows = rowsOf(activeThreads, "active");
     items.push({ kind: "marker", marker: "active-placeholder" });
     items.push(...activeRows);
@@ -3304,6 +3331,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                         section: SidebarSection,
                         // The tree row of the project folder this row sits in.
                         folderRow?: string,
+                        promptExpanded?: boolean,
                       ) => {
                         const threadKey = scopedThreadKey(
                           scopeThreadRef(thread.environmentId, thread.id),
@@ -3349,6 +3377,8 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                             snoozeSupported={serverConfigs.has(thread.environmentId)}
                             pinningSupported={serverConfigs.has(thread.environmentId)}
                             isPinned={thread.pinnedAt != null}
+                            promptExpanded={promptExpanded}
+                            onTogglePrompts={folderRow ? toggleThreadPrompts : undefined}
                             dropVerb={
                               dragState?.activeKey === threadKey
                                 ? resolveSidebarDropVerb(dragState.activeSection, dragTargetSection)
@@ -3433,12 +3463,13 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       ];
                       for (const item of sidebarListItems) {
                         if (item.kind === "thread") {
-                          // Folders draw active rows in their own place below.
-                          if (projectFolders !== null && item.section === "active") continue;
+                          // Project folders draw every visible thread in their own group.
+                          if (projectFolders !== null) continue;
                           items.push(renderThreadRow(threadByKey.get(item.key)!, item.section));
                           continue;
                         }
-                        if (projectFolders !== null && item.marker === "active-placeholder") {
+                        if (projectFolders !== null) {
+                          if (item.marker !== "active-placeholder") continue;
                           for (const folder of projectFolders) {
                             items.push(
                               <SidebarProjectFolderHeader
@@ -3452,13 +3483,26 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                               />,
                             );
                             for (const thread of folder.threads) {
+                              const threadKey = threadShellKey(thread);
+                              const promptExpanded = expandedPromptThreadKeys.has(threadKey);
+                              const section = sectionByThreadKey.get(threadShellKey(thread));
                               items.push(
                                 renderThreadRow(
                                   thread,
-                                  "active",
+                                  section ?? "active",
                                   sidebarFolderRowId(folder.group.projectKey),
+                                  promptExpanded,
                                 ),
                               );
+                              if (promptExpanded) {
+                                items.push(
+                                  <SidebarThreadPrompts
+                                    key={`thread-prompts:${threadKey}`}
+                                    thread={thread}
+                                    onSelectThread={navigateToThread}
+                                  />,
+                                );
+                              }
                             }
                           }
                           continue;
@@ -3575,14 +3619,16 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                       }
                       return items;
                     })()}
-                    {settledShelfExpanded && hiddenSettledCount > 0 ? (
+                    {(settledShelfExpanded || projectFolders !== null) && hiddenSettledCount > 0 ? (
                       <li className="list-none">
                         <button
                           type="button"
                           role="treeitem"
                           tabIndex={-1}
                           data-sidebar-row="settled:more"
-                          data-sidebar-parent="shelf:settled"
+                          data-sidebar-parent={
+                            projectFolders === null ? "shelf:settled" : undefined
+                          }
                           disabled={olderSettledShelf.loading}
                           onClick={() => {
                             olderSettledShelf.retry();

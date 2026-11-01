@@ -1,4 +1,4 @@
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { SourceControlProviderKind, VcsProcessSpawnError } from "@t3tools/contracts";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as ConfigProvider from "effect/ConfigProvider";
@@ -12,6 +12,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http";
 
@@ -72,6 +73,7 @@ function makeLayer(input: {
   ) => HttpClientError.HttpClientError;
   readonly stall?: boolean;
   readonly git?: Partial<HostGit>;
+  readonly process?: SourceControlHost.SourceControlHost["Service"]["process"]["run"];
   readonly env?: Record<string, string>;
   readonly remoteUrl?: string;
 }) {
@@ -136,20 +138,175 @@ function makeLayer(input: {
     Layer.provide(
       ConfigProvider.layer(
         ConfigProvider.fromEnv({
-          env: input.env ?? {
-            T3CODE_BITBUCKET_API_BASE_URL: "https://api.test.local/2.0",
-            T3CODE_BITBUCKET_EMAIL: "user@example.com",
-            T3CODE_BITBUCKET_API_TOKEN: "token",
+          env: {
+            T3CODE_BITBUCKET_API_MODE: "api",
+            ...(input.env ?? {
+              T3CODE_BITBUCKET_API_BASE_URL: "https://api.test.local/2.0",
+              T3CODE_BITBUCKET_EMAIL: "user@example.com",
+              T3CODE_BITBUCKET_API_TOKEN: "token",
+            }),
           },
         }),
       ),
     ),
-    Layer.provideMerge(TestSourceControlHost.layer({ git: { ...git, remotes: resolve } })),
+    Layer.provideMerge(
+      TestSourceControlHost.layer({
+        ...(input.process ? { process: { run: input.process } } : {}),
+        git: { ...git, remotes: resolve },
+      }),
+    ),
     Layer.provideMerge(NodeServices.layer),
   );
 
   return { execute, git: gitMock, resolve, listRemotes, layer };
 }
+
+it.effect("uses bkt for Bitbucket API requests without sending T3 credentials", () => {
+  const run = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>(() =>
+    Effect.succeed(TestSourceControlHost.processOutput('{"values":[]}')),
+  );
+  const { layer } = makeLayer({
+    response: () => Response.json({}),
+    process: run,
+    env: { T3CODE_BITBUCKET_API_MODE: "bkt" },
+  });
+
+  return Effect.gen(function* () {
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    const result = yield* bitbucket.request({
+      method: "GET",
+      url: "https://api.bitbucket.org/2.0/repositories/acme/demo/pullrequests?pagelen=5",
+    });
+    assert.strictEqual(result.body, '{"values":[]}');
+    assert.strictEqual(run.mock.calls[0]?.[0].command, "bkt");
+    assert.strictEqual(run.mock.calls[0]?.[0].env?.BKT_HOST, "https://api.bitbucket.org");
+    assert.deepStrictEqual(run.mock.calls[0]?.[0].args, [
+      "api",
+      "/repositories/acme/demo/pullrequests?pagelen=5",
+      "--method",
+      "GET",
+    ]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("pins bkt to the configured host and includes generated query parameters", () => {
+  const run = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>(() =>
+    Effect.succeed(TestSourceControlHost.processOutput('{"values":[]}')),
+  );
+  const { layer } = makeLayer({
+    response: () => Response.json({}),
+    process: run,
+    env: {
+      T3CODE_BITBUCKET_API_MODE: "bkt",
+      T3CODE_BITBUCKET_API_BASE_URL: "https://api.test.local/2.0",
+    },
+  });
+
+  return Effect.gen(function* () {
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    yield* bitbucket.listPullRequests({
+      cwd: "/repo",
+      headSelector: "origin:feature/merged",
+      state: "merged",
+      limit: 10,
+    });
+
+    const invocation = run.mock.calls[0]?.[0];
+    assert.strictEqual(invocation?.env?.BKT_HOST, "https://api.test.local");
+    const endpoint = invocation?.args[1];
+    assert.isString(endpoint);
+    const url = new URL(endpoint!, "https://api.test.local");
+    assert.strictEqual(url.pathname, "/repositories/pingdotgg/t3code/pullrequests");
+    assert.strictEqual(url.searchParams.get("pagelen"), "10");
+    assert.strictEqual(url.searchParams.get("sort"), "-updated_on");
+    assert.strictEqual(url.searchParams.get("state"), "MERGED");
+    assert.strictEqual(
+      url.searchParams.get("q"),
+      'source.branch.name = "feature/merged" AND state = "MERGED"',
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports API-mode HTTP 503 responses as upstream failures", () => {
+  const { layer } = makeLayer({
+    response: () => new Response("upstream unavailable", { status: 503 }),
+  });
+
+  return Effect.gen(function* () {
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    const error = yield* bitbucket
+      .request({ method: "GET", url: "/repositories/acme/demo" })
+      .pipe(Effect.flip);
+
+    assert.instanceOf(error, BitbucketApi.BitbucketResponseError);
+    assert.strictEqual(error.detail, "Bitbucket returned HTTP 503.");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("reports bkt process launch failures with CLI guidance", () => {
+  const run = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>(() =>
+    Effect.fail(
+      new VcsProcessSpawnError({
+        operation: "BitbucketApi.bkt",
+        command: "bkt",
+        cwd: "/repo",
+        cause: new Error("bkt executable not found"),
+      }),
+    ),
+  );
+  const { layer } = makeLayer({
+    response: () => Response.json({}),
+    process: run,
+    env: { T3CODE_BITBUCKET_API_MODE: "bkt" },
+  });
+
+  return Effect.gen(function* () {
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    const error = yield* bitbucket
+      .request({ method: "GET", url: "/repositories/acme/demo" })
+      .pipe(Effect.flip);
+
+    assert.instanceOf(error, BitbucketApi.BitbucketRequestError);
+    assert.include(error.detail, "The bkt CLI could not run");
+    assert.instanceOf(error.cause, VcsProcessSpawnError);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("infers bkt response status only from explicit HTTP status text", () => {
+  const outputs = [
+    TestSourceControlHost.processOutput("", {
+      stderr: "operation failed after 503 milliseconds",
+      exitCode: ChildProcessSpawner.ExitCode(1),
+    }),
+    TestSourceControlHost.processOutput("", {
+      stderr: "Request failed with HTTP status 403",
+      exitCode: ChildProcessSpawner.ExitCode(1),
+    }),
+    TestSourceControlHost.processOutput("", {
+      stderr: "You are not logged in to Bitbucket",
+      exitCode: ChildProcessSpawner.ExitCode(1),
+    }),
+  ];
+  const run = vi.fn<SourceControlHost.SourceControlHost["Service"]["process"]["run"]>(() =>
+    Effect.succeed(outputs.shift()!),
+  );
+  const { layer } = makeLayer({
+    response: () => Response.json({}),
+    process: run,
+    env: { T3CODE_BITBUCKET_API_MODE: "bkt" },
+  });
+
+  return Effect.gen(function* () {
+    const bitbucket = yield* BitbucketApi.BitbucketApi;
+    for (const status of [500, 403, 401]) {
+      const error = yield* bitbucket
+        .request({ method: "GET", url: "/repositories/acme/demo" })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, BitbucketApi.BitbucketResponseError);
+      assert.strictEqual(error.status, status);
+    }
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("parses pull request responses from the Bitbucket REST API", () => {
   const { execute, layer } = makeLayer({
