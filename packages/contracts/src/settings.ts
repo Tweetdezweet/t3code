@@ -53,6 +53,52 @@ import { PullRequestMergeMethod } from "./pullRequest.ts";
 export const AgentProfileId = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
 export type AgentProfileId = typeof AgentProfileId.Type;
 
+export const ProfileServiceSnapshot = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
+  description: TrimmedString.check(Schema.isMaxLength(500)),
+  instructions: TrimmedString.check(Schema.isMaxLength(20_000)),
+  preferredProvider: Schema.NullOr(TrimmedString),
+  preferredModel: Schema.NullOr(TrimmedString),
+  preferredRuntimeMode: Schema.NullOr(TrimmedString),
+  groupInstructionIds: Schema.Array(TrimmedNonEmptyString),
+});
+export type ProfileServiceSnapshot = typeof ProfileServiceSnapshot.Type;
+
+export const AgentProfileInstructionVersion = Schema.Struct({
+  instructionId: TrimmedNonEmptyString,
+  version: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
+});
+export type AgentProfileInstructionVersion = typeof AgentProfileInstructionVersion.Type;
+
+export const AgentProfileSyncState = Schema.Struct({
+  remoteProfileId: AgentProfileId,
+  remoteVersion: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
+  instructionVersions: Schema.Array(AgentProfileInstructionVersion),
+  lastSyncedAt: TrimmedNonEmptyString,
+  status: Schema.Literals(["synced", "access-lost", "archived"]),
+  mappingRequired: Schema.Boolean,
+  remoteProfile: ProfileServiceSnapshot,
+  lastSyncedEffective: Schema.Struct({ name: TrimmedString, instructions: TrimmedString }),
+});
+export type AgentProfileSyncState = typeof AgentProfileSyncState.Type;
+
+export const AgentProfileServiceConnection = Schema.Struct({
+  endpoint: TrimmedString.check(Schema.isMaxLength(2_000)),
+  accessToken: TrimmedString.check(Schema.isMaxLength(8_000)),
+  credentialConfigured: Schema.Boolean,
+});
+
+export const AgentProfileServiceProxyInput = Schema.Struct({
+  method: Schema.Literals(["GET", "POST", "PUT", "DELETE"]),
+  path: TrimmedNonEmptyString.check(Schema.isMaxLength(500)),
+  body: Schema.optionalKey(Schema.Unknown),
+});
+export const AgentProfileServiceProxyResult = Schema.Struct({
+  status: Schema.Int,
+  body: Schema.Unknown,
+  etag: Schema.optionalKey(TrimmedString),
+});
+
 export const AgentProfile = Schema.Struct({
   name: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
   instructions: TrimmedString.check(Schema.isMaxLength(20_000)),
@@ -1060,6 +1106,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "responseStreamingMode",
   "agentProfileIds",
   "securityReviewerProfileId",
+  "requireSecurityReviewBeforeCommit",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1099,6 +1146,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1215,8 +1263,19 @@ export const ServerSettings = Schema.Struct({
   agentProfiles: Schema.Record(AgentProfileId, AgentProfile).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  agentProfileSyncState: Schema.Record(AgentProfileId, AgentProfileSyncState).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  agentProfileService: AgentProfileServiceConnection.pipe(
+    Schema.withDecodingDefault(
+      Effect.succeed({ endpoint: "", accessToken: "", credentialConfigured: false }),
+    ),
+  ),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -1590,8 +1649,21 @@ export const ServerSettingsPatch = Schema.Struct({
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   agentProfiles: Schema.optionalKey(Schema.Record(AgentProfileId, Schema.NullOr(AgentProfile))),
+  agentProfileSyncState: Schema.optionalKey(
+    Schema.Record(AgentProfileId, Schema.NullOr(AgentProfileSyncState)),
+  ),
+  agentProfileService: Schema.optionalKey(
+    Schema.Struct({
+      endpoint: AgentProfileServiceConnection.fields.endpoint,
+      accessToken: Schema.optionalKey(AgentProfileServiceConnection.fields.accessToken),
+      credentialConfigured: Schema.optionalKey(
+        AgentProfileServiceConnection.fields.credentialConfigured,
+      ),
+    }),
+  ),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),

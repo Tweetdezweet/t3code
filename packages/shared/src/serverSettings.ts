@@ -374,6 +374,7 @@ export function applyServerSettingsPatch(
     usagePriceOverrides: usagePriceOverridesPatch,
     usageModelAliases: usageModelAliasesPatch,
     agentProfiles: agentProfilesPatch,
+    agentProfileSyncState: agentProfileSyncStatePatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
@@ -573,6 +574,14 @@ export function applyServerSettingsPatch(
       : {}),
     ...(agentProfilesPatch !== undefined
       ? { agentProfiles: mergeSettingsEntries(current.agentProfiles, agentProfilesPatch) }
+      : {}),
+    ...(agentProfileSyncStatePatch !== undefined
+      ? {
+          agentProfileSyncState: mergeSettingsEntries(
+            current.agentProfileSyncState,
+            agentProfileSyncStatePatch,
+          ),
+        }
       : {}),
     ...(usagePriceOverridesPatch !== undefined
       ? {

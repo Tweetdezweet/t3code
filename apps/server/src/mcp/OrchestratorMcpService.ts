@@ -1281,6 +1281,12 @@ const make = Effect.gen(function* () {
         `Agent profile ${target.agentProfileId} was not found.`,
       );
     }
+    if (settings.agentProfileSyncState[target.agentProfileId]?.mappingRequired === true) {
+      return yield* failure(
+        "invalid_request",
+        `Agent profile ${profile.name} needs a local provider and model mapping before it can start.`,
+      );
+    }
     if (
       projectSettings.agentProfileIds !== undefined &&
       !projectSettings.agentProfileIds.includes(target.agentProfileId)
