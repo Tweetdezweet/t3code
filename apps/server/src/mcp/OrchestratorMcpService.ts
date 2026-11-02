@@ -121,6 +121,7 @@ import { isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -1262,6 +1263,54 @@ const make = Effect.gen(function* () {
 
   const loadProviders = providerRegistry.getProviders;
 
+  const resolveAgentProfile = Effect.fn("OrchestratorMcpService.resolveAgentProfile")(function* (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+    target: OrchestratorMcpTarget | undefined,
+  ) {
+    if (target?.agentProfileId === undefined) return { target, profile: null } as const;
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(() =>
+        failure("orchestration_error", "Unable to read agent profile settings."),
+      ),
+    );
+    const projectSettings = resolveProjectSettings(settings, parent.thread.projectId).settings;
+    const profile = projectSettings.agentProfiles[target.agentProfileId];
+    if (profile === undefined) {
+      return yield* failure(
+        "invalid_request",
+        `Agent profile ${target.agentProfileId} was not found.`,
+      );
+    }
+    if (
+      projectSettings.agentProfileIds !== undefined &&
+      !projectSettings.agentProfileIds.includes(target.agentProfileId)
+    ) {
+      return yield* failure(
+        "invalid_request",
+        `Agent profile ${profile.name} is not enabled for this project.`,
+      );
+    }
+    const { agentProfileId: _agentProfileId, driverKind: _driverKind, ...targetOptions } = target;
+    return {
+      profile,
+      target: {
+        ...targetOptions,
+        providerInstanceId: profile.modelSelection.instanceId,
+        model: profile.modelSelection.model,
+        ...(profile.modelSelection.options === undefined
+          ? {}
+          : { options: profile.modelSelection.options }),
+      },
+    } as const;
+  });
+
+  const promptForAgentProfile = (instructions: string, task: string | undefined) =>
+    [
+      "You are acting under the following agent profile. Follow these role instructions while completing the task.",
+      instructions,
+      ...(task === undefined ? [] : ["Task:", task]),
+    ].join("\n\n");
+
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
 
@@ -2349,15 +2398,18 @@ const make = Effect.gen(function* () {
         operation: "delegate-task",
       });
       const isRetryOfAcceptedDelegation = yield* threadManagement.hasReceipt(commandId);
+      const configuredProfile = isRetryOfAcceptedDelegation
+        ? { target: input.target, profile: null }
+        : yield* resolveAgentProfile(parent, input.target);
       const target = yield* resolveTargetRechecking({
         parent,
-        target: input.target,
+        target: configuredProfile.target,
         providers,
         skipProjectEnablementFilter: isRetryOfAcceptedDelegation,
       });
       const runtimeMode = yield* resolveRuntimeMode(
         parent.thread.runtimeMode,
-        input.runtimeMode,
+        configuredProfile.profile?.runtimeMode ?? input.runtimeMode,
         target,
       );
       const interactionMode = yield* resolveInteractionMode(
@@ -2406,7 +2458,10 @@ const make = Effect.gen(function* () {
           parentThreadId: scope.thread.threadId,
           parentRunId: parentRun.id,
           parentNodeId: parentRun.rootNodeId,
-          task: taskPrompt(input),
+          task:
+            configuredProfile.profile === null
+              ? taskPrompt(input)
+              : promptForAgentProfile(configuredProfile.profile.instructions, taskPrompt(input)),
           ...(input.title === undefined ? {} : { title: input.title }),
           modelSelection: target.modelSelection,
           runtimeMode,
@@ -2758,11 +2813,14 @@ const make = Effect.gen(function* () {
                     .getThreadShell(threadId)
                     .pipe(Effect.mapError(threadManagementFailure))
                 : null;
+              const configuredProfile = isRetryOfAcceptedCreation
+                ? { target: request.target, profile: null }
+                : yield* resolveAgentProfile(parent, request.target);
               const target = yield* resolveTargetRechecking({
                 parent,
                 target:
                   committedThread === null
-                    ? request.target
+                    ? configuredProfile.target
                     : {
                         ...request.target,
                         providerInstanceId: committedThread.modelSelection.instanceId,
@@ -2772,7 +2830,7 @@ const make = Effect.gen(function* () {
               });
               const runtimeMode = yield* resolveRuntimeMode(
                 parent.thread.runtimeMode,
-                request.runtimeMode,
+                configuredProfile.profile?.runtimeMode ?? request.runtimeMode,
                 target,
               );
               const interactionMode = yield* resolveInteractionMode(
@@ -2816,7 +2874,11 @@ const make = Effect.gen(function* () {
               const resolvedModelSelection = (yield* threadManagement
                 .getThreadRecords(threadId, [])
                 .pipe(Effect.mapError(threadManagementFailure))).thread.modelSelection;
-              if (request.prompt !== undefined) {
+              if (request.prompt !== undefined || configuredProfile.profile !== null) {
+                const prompt =
+                  configuredProfile.profile === null
+                    ? request.prompt!
+                    : promptForAgentProfile(configuredProfile.profile.instructions, request.prompt);
                 yield* threadManagement
                   .dispatch({
                     type: "message.dispatch",
@@ -2835,7 +2897,7 @@ const make = Effect.gen(function* () {
                       requestKey: key,
                       index,
                     }),
-                    text: request.prompt,
+                    text: prompt,
                     attachments: [],
                     modelSelection: resolvedModelSelection,
                     dispatchMode: { type: "start_immediately" },

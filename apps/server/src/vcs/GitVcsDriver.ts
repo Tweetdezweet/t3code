@@ -163,6 +163,7 @@ export interface GitCommitOptions {
   readonly timeoutMs?: number;
   readonly progress?: GitCommitProgress;
   readonly stage?: { readonly filePaths?: readonly string[] };
+  readonly expectedStagedFingerprint?: string;
 }
 
 export interface GitDeleteLocalBranchInput {

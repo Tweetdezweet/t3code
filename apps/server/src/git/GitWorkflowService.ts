@@ -34,6 +34,12 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 
+export interface GitRunStackedActionOptions extends GitManager.GitRunStackedActionOptions {
+  readonly beforeRun?: (
+    input: GitRunStackedActionInput,
+  ) => Effect.Effect<string, GitManagerServiceError>;
+}
+
 export class GitWorkflowService extends Context.Service<
   GitWorkflowService,
   {
@@ -63,7 +69,7 @@ export class GitWorkflowService extends Context.Service<
     readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
     readonly runStackedAction: (
       input: GitRunStackedActionInput,
-      options?: GitManager.GitRunStackedActionOptions,
+      options?: GitRunStackedActionOptions,
     ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
     readonly resolvePullRequest: (
       input: GitPullRequestRefInput,
@@ -379,7 +385,15 @@ export const make = Effect.gen(function* () {
         Effect.flatMap((handle) =>
           withCheckoutLease(
             handle.repository.rootPath,
-            gitManager.runStackedAction(input, options),
+            Effect.gen(function* () {
+              const reviewedCommitFingerprint =
+                options?.beforeRun === undefined ? undefined : yield* options.beforeRun(input);
+              const { beforeRun: _beforeRun, ...managerOptions } = options ?? {};
+              return yield* gitManager.runStackedAction(input, {
+                ...managerOptions,
+                ...(reviewedCommitFingerprint === undefined ? {} : { reviewedCommitFingerprint }),
+              });
+            }),
           ),
         ),
       );

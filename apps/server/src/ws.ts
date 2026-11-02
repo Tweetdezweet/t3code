@@ -209,6 +209,7 @@ import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
+import * as CommitSecurityReviewService from "./git/CommitSecurityReviewService.ts";
 import { refreshPushedPullRequests } from "./git/refreshPushedPullRequests.ts";
 import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
 import * as ReviewService from "./review/ReviewService.ts";
@@ -1309,6 +1310,7 @@ export const layerWsRpc = (
         yield* Effect.context<Effect.Services<ReturnType<typeof remoteSshDeviceHosts>>>();
       const orchestrationEngine = yield* Orchestrator.OrchestratorV2;
       const crypto = yield* Crypto.Crypto;
+      const gitVcsDriver = yield* GitVcsDriver.GitVcsDriver;
       // RPC client ids are only unique within one socket; terminals share viewers across sockets.
       const terminalViewerPrefix = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
       const terminalViewerId = (metadata: { readonly client: { readonly id: number } }) =>
@@ -2978,13 +2980,51 @@ export const layerWsRpc = (
             }),
           ),
         [WS_METHODS.gitRunStackedAction]: (input) =>
-          Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) =>
-            gitWorkflow
+          Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) => {
+            const needsSecurityReview =
+              input.action === "commit" ||
+              input.action === "commit_push" ||
+              input.action === "commit_push_pr";
+            return gitWorkflow
               .runStackedAction(input, {
                 actionId: input.actionId,
                 progressReporter: {
                   publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
                 },
+                ...(needsSecurityReview
+                  ? {
+                      beforeRun: (actionInput: typeof input) =>
+                        Queue.offer(queue, {
+                          kind: "phase_started",
+                          actionId: input.actionId,
+                          cwd: input.cwd,
+                          action: input.action,
+                          phase: "review",
+                          label: "Running security review...",
+                        }).pipe(
+                          Effect.asVoid,
+                          Effect.andThen(
+                            CommitSecurityReviewService.reviewBeforeCommit(actionInput).pipe(
+                              Effect.provideService(Crypto.Crypto, crypto),
+                              Effect.provideService(GitVcsDriver.GitVcsDriver, gitVcsDriver),
+                              Effect.provideService(ProjectService.ProjectService, projectService),
+                              Effect.provideService(
+                                ServerSettings.ServerSettingsService,
+                                serverSettings,
+                              ),
+                              Effect.provideService(
+                                ThreadLaunchService.ThreadLaunchService,
+                                threadLaunch,
+                              ),
+                              Effect.provideService(
+                                ThreadManagementService.ThreadManagementService,
+                                threadManagement,
+                              ),
+                            ),
+                          ),
+                        ),
+                    }
+                  : {}),
               })
               .pipe(
                 Effect.matchCauseEffect({
@@ -3015,8 +3055,8 @@ export const layerWsRpc = (
                       Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
                     ),
                 }),
-              ),
-          ),
+              );
+          }),
         [WS_METHODS.gitResolvePullRequest]: (input) => gitWorkflow.resolvePullRequest(input),
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
           gitWorkflow

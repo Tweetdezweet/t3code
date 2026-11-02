@@ -2559,6 +2559,55 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     if (options?.stage !== undefined) {
       yield* stageCommitChanges(cwd, options.stage.filePaths);
     }
+    if (options?.expectedStagedFingerprint !== undefined) {
+      const stagedSummary = yield* runGitStdoutWithOptions(
+        "GitVcsDriver.commit.reviewSummary",
+        cwd,
+        ["diff", "--cached", "--name-status"],
+        { maxOutputBytes: REVIEW_METADATA_MAX_OUTPUT_BYTES },
+      );
+      const stagedPatch = yield* runGitStdoutWithOptions(
+        "GitVcsDriver.commit.reviewPatch",
+        cwd,
+        ["diff", "--no-ext-diff", "--no-textconv", "--cached", "--patch", "--minimal"],
+        {
+          maxOutputBytes: PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES,
+          appendTruncationMarker: true,
+        },
+      );
+      if (stagedPatch.endsWith(OUTPUT_TRUNCATED_MARKER)) {
+        return yield* new GitCommandError({
+          operation: "GitVcsDriver.commit.review",
+          command: "git commit",
+          cwd,
+          detail: "The staged changes are too large for a complete security review.",
+        });
+      }
+      const fingerprint = yield* crypto
+        .digest("SHA-256", new TextEncoder().encode(`${stagedSummary.trim()}\0${stagedPatch}`))
+        .pipe(
+          Effect.map(Hex.encode),
+          Effect.mapError(
+            (cause) =>
+              new GitCommandError({
+                operation: "GitVcsDriver.commit.review",
+                command: "git commit",
+                cwd,
+                detail: "Could not verify the reviewed changes.",
+                cause,
+              }),
+          ),
+        );
+      if (fingerprint !== options.expectedStagedFingerprint) {
+        return yield* new GitCommandError({
+          operation: "GitVcsDriver.commit.review",
+          command: "git commit",
+          cwd,
+          detail:
+            "The staged changes differ from the reviewed changes. Run the review again before committing.",
+        });
+      }
+    }
     const args = ["commit", "-m", subject];
     const trimmedBody = body.trim();
     if (trimmedBody.length > 0) {

@@ -1943,12 +1943,25 @@ describe("OrchestratorMcpService provider resolution", () => {
             { databaseLayer: layerDatabase, runEffectWorker: false },
           );
           const layerSettings = ServerSettings.layerTest({
+            agentProfiles: {
+              reviewer: {
+                name: "Security Reviewer",
+                instructions: "Focus on auth and input validation.",
+                modelSelection: parentEnabled
+                  ? { instanceId: codexInstanceId, model: "gpt-5.4" }
+                  : { instanceId: altInstanceId, model: "gpt-5.5" },
+                runtimeMode: "approval-required",
+              },
+            },
             providerInstances: {
               [codexInstanceId]: { driver: "codex", enabled: true },
               [altInstanceId]: { driver: "codex", enabled: true },
             },
             projectSettingsOverrides: {
-              [projectId]: { providerInstances: { [codexInstanceId]: { enabled: parentEnabled } } },
+              [projectId]: {
+                agentProfileIds: ["reviewer"],
+                providerInstances: { [codexInstanceId]: { enabled: parentEnabled } },
+              },
             },
           });
           const layerThreads = ThreadManagementService.layer.pipe(
@@ -2033,6 +2046,18 @@ describe("OrchestratorMcpService provider resolution", () => {
             const before = yield* orchestrator.getThreadProjection(child.threadId);
             assert.deepEqual(before.runs[0]?.modelSelection, selection);
             assert.equal(before.messages.length, 1);
+            const profiled = yield* service.createThreads(scope, {
+              threads: [{ target: { agentProfileId: "reviewer" }, prompt: "Review this patch." }],
+              clientRequestId: "profiled-reviewer",
+            });
+            const reviewer = yield* orchestrator.getThreadProjection(profiled.threads[0]!.threadId);
+            assert.deepEqual(reviewer.thread.modelSelection, {
+              instanceId: parentEnabled ? codexInstanceId : altInstanceId,
+              model: parentEnabled ? "gpt-5.4" : "gpt-5.5",
+            });
+            assert.equal(reviewer.thread.runtimeMode, "approval-required");
+            assert.include(reviewer.messages[0]?.text ?? "", "Focus on auth and input validation.");
+            assert.include(reviewer.messages[0]?.text ?? "", "Review this patch.");
             const empty = yield* service.createThreads(scope, {
               ...request,
               clientRequestId: "empty",

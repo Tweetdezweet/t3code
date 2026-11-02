@@ -42,6 +42,7 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { AgentProfileId } from "./settings.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -94,6 +95,11 @@ export const OrchestratorMcpTargetOptions = Schema.Union([
 export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.Type;
 
 export const OrchestratorMcpTarget = Schema.Struct({
+  agentProfileId: Schema.optional(
+    AgentProfileId.annotate({
+      description: "Use a configured agent profile and its instructions, provider, and model.",
+    }),
+  ),
   providerInstanceId: Schema.optional(
     ProviderInstanceId.annotate({
       description: "Provider instance id from `orchestrator_capabilities`.",

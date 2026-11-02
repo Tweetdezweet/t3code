@@ -35,6 +35,15 @@ follow-ups from delegated tasks. A turn already running when the switch flips fi
 task's result still lands in its parent thread, which sees it on its next turn. Reset returns the project to the
 machine's setting. Every other provider setting stays per machine.
 
+## Agent profiles and commit review
+
+On web or desktop, open **Settings → Threads → Agent profiles** with **All projects** selected to
+create reusable roles. Each profile stores its instructions, provider model, and runtime mode. In a
+project's settings, choose which profiles orchestration can use and select its **Required security
+reviewer**. T3 starts that reviewer in a separate thread for every commit action and blocks the
+commit if the review finds issues or does not finish successfully. There is no project setting to
+turn the review off.
+
 On mobile, open **Settings** and use the filter in its header to choose connected environments
 and a project. The filter stays available in server-setting pages. With **All projects** selected,
 the server-setting pages, such as Threads, Source control and Worktrees, edit the selected

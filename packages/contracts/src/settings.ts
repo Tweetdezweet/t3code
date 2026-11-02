@@ -50,6 +50,17 @@ import {
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
+export const AgentProfileId = TrimmedNonEmptyString.check(Schema.isMaxLength(64));
+export type AgentProfileId = typeof AgentProfileId.Type;
+
+export const AgentProfile = Schema.Struct({
+  name: TrimmedNonEmptyString.check(Schema.isMaxLength(80)),
+  instructions: TrimmedString.check(Schema.isMaxLength(20_000)),
+  modelSelection: ModelSelection,
+  runtimeMode: RuntimeMode,
+});
+export type AgentProfile = typeof AgentProfile.Type;
+
 export const TimestampFormat = Schema.Literals(["locale", "12-hour", "24-hour"]);
 export type TimestampFormat = typeof TimestampFormat.Type;
 const DEFAULT_TIMESTAMP_FORMAT: TimestampFormat = "locale";
@@ -1047,6 +1058,8 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "agentProfileIds",
+  "securityReviewerProfileId",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1084,6 +1097,8 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
+  securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1197,6 +1212,11 @@ export const ServerSettings = Schema.Struct({
   responseStreamingMode: ResponseStreamingMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("paragraph" as const)),
   ),
+  agentProfiles: Schema.Record(AgentProfileId, AgentProfile).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+  agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
+  securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -1569,6 +1589,9 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   worktreesDirectory: Schema.optionalKey(TrimmedString),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  agentProfiles: Schema.optionalKey(Schema.Record(AgentProfileId, Schema.NullOr(AgentProfile))),
+  agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
+  securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),

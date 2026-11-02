@@ -97,6 +97,7 @@ export interface GitActionProgressReporter {
 export interface GitRunStackedActionOptions {
   readonly actionId?: string;
   readonly progressReporter?: GitActionProgressReporter;
+  readonly reviewedCommitFingerprint?: string;
 }
 
 export interface GitRemoteStatusOptions extends GitVcsDriver.GitRemoteStatusOptions {
@@ -2127,6 +2128,7 @@ export const make = Effect.gen(function* () {
     filePaths?: readonly string[],
     progressReporter?: GitActionProgressReporter,
     actionId?: string,
+    reviewedCommitFingerprint?: string,
   ) {
     const emit = (event: GitActionProgressPayload) =>
       progressReporter && actionId
@@ -2213,6 +2215,9 @@ export const make = Effect.gen(function* () {
     const { commitSha } = yield* gitCore.commit(cwd, suggestion.subject, suggestion.body, {
       timeoutMs: COMMIT_TIMEOUT_MS,
       stage: filePaths ? { filePaths } : {},
+      ...(reviewedCommitFingerprint === undefined
+        ? {}
+        : { expectedStagedFingerprint: reviewedCommitFingerprint }),
       ...(commitProgress ? { progress: commitProgress } : {}),
     });
     if (currentHookName !== null) {
@@ -3152,6 +3157,7 @@ export const make = Effect.gen(function* () {
                   input.filePaths,
                   options?.progressReporter,
                   progress.actionId,
+                  options?.reviewedCommitFingerprint,
                 ),
               ),
             )
