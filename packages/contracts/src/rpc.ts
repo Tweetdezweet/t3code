@@ -357,6 +357,8 @@ import {
   ServerSettings,
   ServerSettingsError,
   ServerSettingsPatch,
+  AgentProfileServiceProxyInput,
+  AgentProfileServiceProxyResult,
 } from "./settings.ts";
 import {
   ScheduledTaskDeleteInput,
@@ -512,6 +514,7 @@ export const WS_METHODS = {
   peerLinksUnlink: "peerLinks.unlink",
   peerLinksAnswerRequest: "peerLinks.answerRequest",
   serverUpdateSettings: "server.updateSettings",
+  agentProfileServiceRequest: "agentProfileService.request",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -825,6 +828,12 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
   }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsAgentProfileServiceRequestRpc = Rpc.make(WS_METHODS.agentProfileServiceRequest, {
+  payload: AgentProfileServiceProxyInput,
+  success: AgentProfileServiceProxyResult,
+  error: EnvironmentAuthorizationError,
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -1999,6 +2008,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetStorageCleanupReportRpc,
   WsServerGetDatabaseStorageRpc,
   WsServerUpdateSettingsRpc,
+  WsAgentProfileServiceRequestRpc,
   WsPeerLinksListRpc,
   WsPeerLinksLinkRpc,
   WsPeerLinksUnlinkRpc,

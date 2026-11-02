@@ -149,6 +149,12 @@ export const reviewBeforeCommit = Effect.fn("CommitSecurityReviewService.reviewB
         "The selected security reviewer profile no longer exists.",
       );
     }
+    if (settings.agentProfileSyncState[reviewerId]?.mappingRequired === true) {
+      return yield* operationError(
+        input.cwd,
+        "The selected security reviewer needs a local provider and model mapping.",
+      );
+    }
     if (
       projectSettings.agentProfileIds !== undefined &&
       !projectSettings.agentProfileIds.includes(reviewerId)

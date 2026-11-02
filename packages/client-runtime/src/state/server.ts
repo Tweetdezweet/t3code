@@ -1172,6 +1172,11 @@ export function createServerEnvironmentAtoms<R, E>(
     scheduler: configScheduler,
     concurrency: configConcurrency,
   });
+  const agentProfileServiceRequest = createEnvironmentRpcCommand(runtime, {
+    label: "environment-data:server:agent-profile-service-request",
+    tag: WS_METHODS.agentProfileServiceRequest,
+    concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+  });
 
   return {
     configValueAtom,
@@ -1420,6 +1425,7 @@ export function createServerEnvironmentAtoms<R, E>(
       concurrency: configConcurrency,
     }),
     updateSettings,
+    agentProfileServiceRequest,
     mutateProviderInstance: updateSettings,
     prepareAcpRegistryAgent: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:acp-registry:prepare",

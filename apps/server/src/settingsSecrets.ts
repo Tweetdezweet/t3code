@@ -135,6 +135,12 @@ export function mapSettingsSecrets(
     ]),
   ) as ServerSettings["sourceControlHosts"];
 
+  const agentProfileService = mapFields(
+    settings.agentProfileService,
+    ["accessToken"],
+    (field) => `agent-profile-service-${encode(field)}`,
+  ) as ServerSettings["agentProfileService"];
+
   const usageLimitSources = Object.fromEntries(
     Object.entries(settings.usageLimitSources).map(([id, source]) => [
       id,
@@ -177,6 +183,7 @@ export function mapSettingsSecrets(
     ...settings,
     providerInstances,
     sourceControlHosts,
+    agentProfileService,
     usageLimitSources,
     easDeviceHosts,
     simlockDeviceHosts,

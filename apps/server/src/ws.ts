@@ -1,4 +1,5 @@
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
+import type { AgentProfileServiceProxyInput } from "@t3tools/contracts/settings";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
@@ -18,6 +19,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
 import * as Stream from "effect/Stream";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import {
@@ -40,6 +42,7 @@ import {
   type FileManagerRevealKind,
   type OrchestrationV2Command,
   type GitActionProgressEvent,
+  GitCommandError,
   type GitManagerServiceError,
   type MessageId,
   type AcpRegistryImportSessionInput,
@@ -270,6 +273,18 @@ import {
 import * as AgentSessionScanner from "./project/AgentSessionScanner.ts";
 import * as AgentSessionImporter from "./project/AgentSessionImporter.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
+
+function parseAgentProfileServiceUrl(endpoint: string, path: string) {
+  try {
+    const base = new URL(endpoint);
+    const target = new URL(path, `${base.origin}/`);
+    return { base, target };
+  } catch {
+    return undefined;
+  }
+}
+
+const decodeAgentProfileServiceJson = Schema.decodeEffect(Schema.fromJsonString(Schema.Unknown));
 
 const CONFIG_DISCOVERY_TIMEOUT = Duration.seconds(5);
 const isProviderUploadFeedbackError = Schema.is(ProviderUploadFeedbackError);
@@ -1368,6 +1383,69 @@ export const layerWsRpc = (
       const storageCleanup = yield* StorageCleanup.StorageCleanup;
       const databaseStorage = yield* DatabaseStorage.DatabaseStorage;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const agentProfileServiceRequest = Effect.fn("Ws.agentProfileServiceRequest")(function* (
+        input: AgentProfileServiceProxyInput,
+      ) {
+        const settingsResult = yield* serverSettings.getSettings.pipe(Effect.result);
+        if (Result.isFailure(settingsResult)) {
+          return { status: 503, body: { error: "T3 server settings are unavailable." } };
+        }
+        const connection = settingsResult.success.agentProfileService;
+        const parsedUrl = parseAgentProfileServiceUrl(connection.endpoint, input.path);
+        if (parsedUrl === undefined) {
+          return { status: 400, body: { error: "Invalid profile service endpoint or path." } };
+        }
+        const { base, target } = parsedUrl;
+        const localHttp =
+          base.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(base.hostname);
+        if (
+          (!localHttp && base.protocol !== "https:") ||
+          !["", "/"].includes(base.pathname) ||
+          target.origin !== base.origin ||
+          !/^\/v1\/(profiles|instructions)(\/|$)/.test(target.pathname) ||
+          !connection.credentialConfigured ||
+          !connection.accessToken
+        ) {
+          return {
+            status: 400,
+            body: { error: "Configure an HTTPS profile service endpoint and access token." },
+          };
+        }
+        const httpClient = yield* HttpClient.HttpClient;
+        const request = HttpClientRequest.make(input.method)(target).pipe(
+          HttpClientRequest.bearerToken(connection.accessToken),
+        );
+        const prepared = yield* (
+          input.body === undefined
+            ? Effect.succeed(request)
+            : HttpClientRequest.bodyJson(input.body)(request)
+        ).pipe(Effect.result);
+        if (Result.isFailure(prepared)) {
+          return { status: 400, body: { error: "Profile service request body is invalid." } };
+        }
+        const responseResult = yield* httpClient
+          .execute(prepared.success)
+          .pipe(Effect.timeout("15 seconds"), Effect.result);
+        if (Result.isFailure(responseResult)) {
+          return { status: 502, body: { error: "Profile service request failed." } };
+        }
+        const response = responseResult.success;
+        if (Number(response.headers["content-length"] ?? 0) > 2_000_000) {
+          return { status: 502, body: { error: "Profile service response is too large." } };
+        }
+        const textResult = yield* response.text.pipe(Effect.result);
+        if (Result.isFailure(textResult)) {
+          return {
+            status: 502,
+            body: { error: "Profile service response could not be read." },
+          };
+        }
+        const text = textResult.success;
+        const decoded = yield* decodeAgentProfileServiceJson(text).pipe(Effect.result);
+        const body = Result.isSuccess(decoded) ? decoded.success : text.slice(0, 2_000_000);
+        const etag = response.headers.etag;
+        return { status: response.status, body, ...(etag === undefined ? {} : { etag }) };
+      });
       const secretResolver = yield* SecretResolver.SecretResolver;
       const peerLinks = yield* PeerLinks.PeerLinks;
       const peerLinkRequests = yield* PeerLinkRequests.PeerLinkRequests;
@@ -2552,6 +2630,11 @@ export const layerWsRpc = (
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
             return ServerSettings.redactServerSettingsForClient(settings);
           }),
+        [WS_METHODS.agentProfileServiceRequest]: (input) =>
+          agentProfileServiceRequest(input).pipe(
+            Effect.provide(FetchHttpClient.layer),
+            Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+          ),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           TraceDiagnostics.readTraceDiagnostics({
@@ -3019,6 +3102,16 @@ export const layerWsRpc = (
                               Effect.provideService(
                                 ThreadManagementService.ThreadManagementService,
                                 threadManagement,
+                              ),
+                              Effect.mapError(
+                                (cause) =>
+                                  new GitCommandError({
+                                    operation: "security-review",
+                                    command: "agent-review",
+                                    cwd: input.cwd,
+                                    detail: "Security review could not complete.",
+                                    cause,
+                                  }),
                               ),
                             ),
                           ),

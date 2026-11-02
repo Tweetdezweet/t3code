@@ -1983,4 +1983,26 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), broken);
     }).pipe(Effect.provide(layerServerSettings())),
   );
+
+  it.effect("stores the profile service token as a secret and redacts it from settings", () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const saved = yield* service.updateSettings({
+        agentProfileService: {
+          endpoint: "https://profiles.example.test",
+          accessToken: "profile-service-token",
+          credentialConfigured: true,
+        },
+      });
+      const client = ServerSettingsModule.redactServerSettingsForClient(saved);
+      assert.equal(client.agentProfileService.accessToken, "••••••");
+      assert.isTrue(client.agentProfileService.credentialConfigured);
+      assert.include(JSON.stringify(saved), "profile-service-token");
+      assert.notInclude(yield* fs.readFileString(config.settingsPath), "profile-service-token");
+      const reloaded = yield* service.getSettings;
+      assert.equal(reloaded.agentProfileService.accessToken, "profile-service-token");
+    }).pipe(Effect.provide(layerServerSettingsWithSecrets())),
+  );
 });
