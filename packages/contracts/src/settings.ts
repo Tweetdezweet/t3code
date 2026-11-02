@@ -1060,6 +1060,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "responseStreamingMode",
   "agentProfileIds",
   "securityReviewerProfileId",
+  "requireSecurityReviewBeforeCommit",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1099,6 +1100,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.optionalKey(Schema.Boolean),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1217,6 +1219,9 @@ export const ServerSettings = Schema.Struct({
   ),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.Boolean.pipe(
+    Schema.withDecodingDefault(Effect.succeed(false)),
+  ),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
@@ -1592,6 +1597,7 @@ export const ServerSettingsPatch = Schema.Struct({
   agentProfiles: Schema.optionalKey(Schema.Record(AgentProfileId, Schema.NullOr(AgentProfile))),
   agentProfileIds: Schema.optionalKey(Schema.Array(AgentProfileId)),
   securityReviewerProfileId: Schema.optionalKey(AgentProfileId),
+  requireSecurityReviewBeforeCommit: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),

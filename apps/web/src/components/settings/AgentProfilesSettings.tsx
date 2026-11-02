@@ -6,6 +6,7 @@ import { useSettingsScope } from "./SettingsScopeContext";
 import { useScopedSettings, useUpdateScopedSettings } from "./useScopedSettings";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
 import { SettingsSection } from "./settingsLayout";
 
@@ -87,8 +88,21 @@ export function AgentProfilesSettings() {
       ))}
       {isProjectScope ? (
         <div className="mt-3 grid gap-2">
+          <div className="flex items-center justify-between gap-3">
+            <label className="text-sm font-medium" htmlFor="require-security-review">
+              Require security review before commit
+            </label>
+            <Switch
+              id="require-security-review"
+              checked={settings.requireSecurityReviewBeforeCommit}
+              onCheckedChange={(checked) =>
+                updateSettings({ requireSecurityReviewBeforeCommit: Boolean(checked) })
+              }
+              aria-label="Require security review before commit"
+            />
+          </div>
           <label className="text-sm font-medium" htmlFor="security-reviewer-profile">
-            Required security reviewer
+            Security reviewer profile
           </label>
           <select
             id="security-reviewer-profile"
@@ -111,8 +125,8 @@ export function AgentProfilesSettings() {
               ))}
           </select>
           <p className="text-xs text-muted-foreground">
-            T3 requires this profile to review the exact selected changes before its commit action.
-            Select a new reviewer before removing the current one.
+            When enabled, T3 reviews the exact selected changes before committing. A missing
+            reviewer or failed review blocks the commit.
           </p>
         </div>
       ) : null}

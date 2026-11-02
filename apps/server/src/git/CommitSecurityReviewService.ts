@@ -98,11 +98,7 @@ export const reviewBeforeCommit = Effect.fn("CommitSecurityReviewService.reviewB
             operationError(input.cwd, "Could not resolve the project for this commit.", cause),
           ),
         );
-      if (Option.isSome(project)) return project.value.id;
-      return yield* operationError(
-        input.cwd,
-        "A project with a required security reviewer must be selected before committing.",
-      );
+      return Option.isSome(project) ? project.value.id : null;
     });
 
     const readPatch = (input: GitRunStackedActionInput) =>
@@ -134,6 +130,11 @@ export const reviewBeforeCommit = Effect.fn("CommitSecurityReviewService.reviewB
       ),
     );
     const projectSettings = resolveProjectSettings(settings, projectId).settings;
+    if (!projectSettings.requireSecurityReviewBeforeCommit) {
+      const patch = yield* readPatch(input);
+      if (patch === null) return yield* patchFingerprint(crypto, "", "").pipe(Effect.map(toHex));
+      return patch.fingerprint;
+    }
     const reviewerId = projectSettings.securityReviewerProfileId;
     if (reviewerId === undefined) {
       return yield* operationError(
