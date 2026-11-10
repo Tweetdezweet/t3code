@@ -49,7 +49,9 @@ export const setTailscaleServeEnabled = DesktopIpc.makeIpcMethod({
     const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
     const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
     const change = yield* serverExposure.setTailscaleServeEnabled(input);
-    if (change.requiresRelaunch) {
+    // The configured endpoint can be unreachable even when the preference is already true;
+    // enabling again must retry Serve after an earlier startup or relaunch failure.
+    if (change.requiresRelaunch || input.enabled) {
       yield* lifecycle.relaunch(
         change.state.tailscaleServeEnabled ? "tailscale-serve-enabled" : "tailscale-serve-disabled",
       );
