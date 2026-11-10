@@ -233,7 +233,9 @@ const make = Effect.fn("desktop.environment.make")(function* (
     linuxDesktopEntryName: resolveLinuxDesktopEntryName(isDevelopment),
     linuxApplicationsDir,
     desktopLauncherPath: config.desktopLauncherPath,
-    appImagePath: config.appImagePath,
+    appImagePath: Option.map(config.appImagePath, (appImagePath) =>
+      path.resolve(process.env.PWD ?? process.cwd(), appImagePath),
+    ),
     defaultDesktopSettings: DesktopAppSettings.resolveDefaultDesktopSettings(input.appVersion),
     runtimeInfo: resolveDesktopRuntimeInfo({
       platform: input.platform,

@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -223,9 +224,10 @@ export const make = DesktopLifecycle.of({
         yield* electronApp.exit(75);
         return;
       }
+      const args = process.argv.slice(1);
       yield* electronApp.relaunch({
-        execPath: process.execPath,
-        args: process.argv.slice(1),
+        execPath: Option.getOrElse(environment.appImagePath, () => process.execPath),
+        args,
       });
       yield* electronApp.exit(0);
     }).pipe(
